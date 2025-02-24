@@ -9,4 +9,4 @@ The universal binary extraction and Fakeheader scripts I created myself，Whethe
 
 
 
-2025年1月24日凌晨1点追加c代码，由python代码修改而成，无论是python版本还是c版本功能都是一样的，exe的体积比之前的更小，大家可以放心的使用。
+2025年2月25日增加新功能，可输入起始地址和结束地址，提取此地址范围内的数据，删除c语言版本，因为太难做，只保存了python版本和c#的版本。
