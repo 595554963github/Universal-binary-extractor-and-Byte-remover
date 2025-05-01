@@ -10,3 +10,7 @@ This is my self-made universal binary extractor and universal byte remover. Whet
 
 
 2025年2月25日增加新功能，可输入起始地址和结束地址，提取此地址范围内的数据，删除c语言版本，因为太难做，只保存了python版本和c#的版本。
+
+2025年4月29日把万能二进制提取器做成c#GUI版本，如果要查看GUI版本的代码请转到https://github.com/595554963github/Universal-Binary-Extractor-GUI
+
+2025年5月1日新增万能字节移除器c#命令行版本和GUI版本，本项目只包含命令行版本的代码，如果要查看GUI版本的代码请转到https://github.com/595554963github/Universal-Byte-Remover-GUI
