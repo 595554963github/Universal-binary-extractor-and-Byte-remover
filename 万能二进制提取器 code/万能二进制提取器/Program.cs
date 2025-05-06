@@ -1,12 +1,13 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
 
 class FileExtractor
 {
     static byte[] ParseStartSequence(string startSequenceInput)
     {
-        // 检查输入是否为 null 或空字符串
         if (string.IsNullOrEmpty(startSequenceInput))
         {
             return Array.Empty<byte>();
@@ -32,7 +33,6 @@ class FileExtractor
 
     static byte[] ParseEndSequence(string endSequenceInput)
     {
-        // 检查输入是否为 null 或空字符串
         if (string.IsNullOrEmpty(endSequenceInput))
         {
             return Array.Empty<byte>();
@@ -60,33 +60,38 @@ class FileExtractor
         return result.ToArray();
     }
 
-    static int FindEndIndex(byte[] content, int startIndex, byte[]? endSequence, int minRepeatCount, byte[] startSequenceBytes)
+    static long FindEndIndex(MemoryMappedViewAccessor accessor, long startIndex, byte[]? endSequence, int minRepeatCount, byte[] startSequenceBytes, long fileSize)
     {
         if (endSequence == null || endSequence.Length == 0)
         {
-            int nextStartIndex = IndexOfSequence(content, startSequenceBytes, startIndex + 1);
-            return nextStartIndex == -1 ? content.Length : nextStartIndex;
+            long nextStartIndex = IndexOfSequence(accessor, startSequenceBytes, startIndex + 1, fileSize);
+            return nextStartIndex == -1 ? fileSize : nextStartIndex;
         }
         else
         {
             if (minRepeatCount == 0)
             {
-                int endIndex = IndexOfSequence(content, endSequence, startIndex + 1);
-                return endIndex == -1 ? content.Length : endIndex + endSequence.Length;
+                long endIndex = IndexOfSequence(accessor, endSequence, startIndex + 1, fileSize);
+                return endIndex == -1 ? fileSize : endIndex + endSequence.Length;
             }
             else
             {
                 byte byteValue = endSequence[0];
                 int repeatCount = 0;
-                int currentIndex = startIndex + 1;
-                while (currentIndex < content.Length)
+                long currentIndex = startIndex + 1;
+                while (currentIndex < fileSize)
                 {
-                    if (content[currentIndex] == byteValue)
+                    byte currentByte = accessor.ReadByte(currentIndex);
+                    if (currentByte == byteValue)
                     {
                         repeatCount++;
-                        if (repeatCount >= minRepeatCount && (minRepeatCount == 0 || (currentIndex + 1 < content.Length && content[currentIndex + 1] != byteValue)))
+                        if (repeatCount >= minRepeatCount)
                         {
-                            return currentIndex + 1;
+                            if (minRepeatCount == 0 ||
+                                (currentIndex + 1 < fileSize && accessor.ReadByte(currentIndex + 1) != byteValue))
+                            {
+                                return currentIndex + 1;
+                            }
                         }
                     }
                     else
@@ -95,7 +100,7 @@ class FileExtractor
                     }
                     currentIndex++;
                 }
-                return content.Length;
+                return fileSize;
             }
         }
     }
@@ -103,20 +108,20 @@ class FileExtractor
     static void ExtractContent(string filePath, byte[] startSequenceBytes, byte[]? endSequence = null, string outputFormat = "bin",
                                string extractMode = "all", string? startAddress = null, string? endAddress = null, int minRepeatCount = 0)
     {
-        // 检查输出格式是否为 null
         outputFormat = outputFormat ?? "bin";
 
         try
         {
-            byte[] content = File.ReadAllBytes(filePath);
-            int startRange = 0;
-            int endRange = content.Length;
+            var fileInfo = new FileInfo(filePath);
+            long fileSize = fileInfo.Length;
+            long startRange = 0;
+            long endRange = fileSize;
 
             if (startAddress != null && endAddress != null)
             {
-                int startIndex = Convert.ToInt32(startAddress.Replace("0x", ""), 16);
-                int endIndex = Convert.ToInt32(endAddress.Replace("0x", ""), 16);
-                if (startIndex > content.Length || endIndex > content.Length || startIndex > endIndex)
+                long startIndex = Convert.ToInt64(startAddress.Replace("0x", ""), 16);
+                long endIndex = Convert.ToInt64(endAddress.Replace("0x", ""), 16);
+                if (startIndex > fileSize || endIndex > fileSize || startIndex > endIndex)
                 {
                     Console.WriteLine($"指定地址范围 {startAddress}-{endAddress} 无效，无法提取。");
                     return;
@@ -126,8 +131,8 @@ class FileExtractor
             }
             else if (startAddress != null)
             {
-                int targetIndex = Convert.ToInt32(startAddress.Replace("0x", ""), 16);
-                if (targetIndex > content.Length)
+                long targetIndex = Convert.ToInt64(startAddress.Replace("0x", ""), 16);
+                if (targetIndex > fileSize)
                 {
                     Console.WriteLine($"指定地址 {startAddress} 超出文件范围，无法提取。");
                     return;
@@ -140,7 +145,7 @@ class FileExtractor
                 else if (extractMode == "after")
                 {
                     startRange = targetIndex;
-                    endRange = content.Length;
+                    endRange = fileSize;
                 }
                 else
                 {
@@ -150,85 +155,105 @@ class FileExtractor
             }
 
             int count = 0;
-            int startIndexInContent = startRange;
             List<string> notes = new List<string>();
-            while (startIndexInContent < endRange)
+
+            using (var mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.Open, null, 0, MemoryMappedFileAccess.Read))
+            using (var accessor = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read))
             {
-                startIndexInContent = IndexOfSequence(content, startSequenceBytes, startIndexInContent);
-                if (startIndexInContent == -1)
+                long startIndexInContent = startRange;
+                while (startIndexInContent < endRange)
                 {
-                    Console.WriteLine($"No more start sequences found in {filePath}");
-                    break;
-                }
+                    startIndexInContent = IndexOfSequence(accessor, startSequenceBytes, startIndexInContent, endRange);
+                    if (startIndexInContent == -1)
+                    {
+                        Console.WriteLine($"No more start sequences found in {filePath}");
+                        break;
+                    }
 
-                int endIndexInContent = FindEndIndex(content, startIndexInContent, endSequence, minRepeatCount, startSequenceBytes);
-                endIndexInContent = Math.Min(endIndexInContent, endRange);
+                    long endIndexInContent = FindEndIndex(accessor, startIndexInContent, endSequence, minRepeatCount, startSequenceBytes, endRange);
+                    endIndexInContent = Math.Min(endIndexInContent, endRange);
 
-                byte[] extractedData = new byte[endIndexInContent - startIndexInContent];
-                Array.Copy(content, startIndexInContent, extractedData, 0, extractedData.Length);
+                    string newFilename = $"{Path.GetFileNameWithoutExtension(filePath)}_{count}.{outputFormat}";
+                    string directoryName = Path.GetDirectoryName(filePath) ?? ".";
+                    string newFilePath = Path.Combine(directoryName, newFilename);
 
-                string newFilename = $"{Path.GetFileNameWithoutExtension(filePath)}_{count}.{outputFormat}";
-                string? directoryName = Path.GetDirectoryName(filePath);
-                if (directoryName == null)
-                {
-                    Console.WriteLine($"无法获取文件 {filePath} 的目录信息，跳过该文件。");
-                    continue;
-                }
-                string newFilePath = Path.Combine(directoryName, newFilename);
-                try
-                {
-                    File.WriteAllBytes(newFilePath, extractedData);
-                }
-                catch (IOException e)
-                {
-                    Console.WriteLine($"无法写入文件 {newFilePath}，错误信息：{e}");
-                    continue;
-                }
-                Console.WriteLine($"Extracted content saved as: {newFilePath}");
+                    // Use streaming approach for large files
+                    ExtractAndSaveSegment(filePath, newFilePath, startIndexInContent, endIndexInContent - startIndexInContent);
 
-                notes.Add($"File: {newFilePath}, Start Address: {startIndexInContent}, End Address: {endIndexInContent}");
-                count++;
-                startIndexInContent = endIndexInContent;
+                    Console.WriteLine($"Extracted content saved as: {newFilePath}");
+                    notes.Add($"File: {newFilePath}, Start Address: {startIndexInContent}, End Address: {endIndexInContent}");
+                    count++;
+                    startIndexInContent = endIndexInContent;
+                }
             }
 
             SaveNotes(filePath, notes);
         }
-        catch (IOException e)
+        catch (Exception e)
         {
-            Console.WriteLine($"无法读取文件 {filePath}，错误信息：{e}");
+            Console.WriteLine($"处理文件 {filePath} 时出错，错误信息：{e}");
+        }
+    }
+
+    static void ExtractAndSaveSegment(string sourcePath, string destPath, long startPosition, long length)
+    {
+        const int bufferSize = 1024 * 1024; // 1MB buffer
+        var buffer = new byte[bufferSize];
+
+        using (var sourceStream = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize, FileOptions.SequentialScan))
+        using (var destStream = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize))
+        {
+            sourceStream.Seek(startPosition, SeekOrigin.Begin);
+
+            long bytesRemaining = length;
+            while (bytesRemaining > 0)
+            {
+                int bytesToRead = (int)Math.Min(bufferSize, bytesRemaining);
+                int bytesRead = sourceStream.Read(buffer, 0, bytesToRead);
+                if (bytesRead == 0) break;
+
+                destStream.Write(buffer, 0, bytesRead);
+                bytesRemaining -= bytesRead;
+            }
         }
     }
 
     static void SaveNotes(string filePath, List<string> notes)
     {
         string notesFilename = $"{Path.GetFileNameWithoutExtension(filePath)}_notes.txt";
-        string? directoryName = Path.GetDirectoryName(filePath);
-        if (directoryName == null)
-        {
-            Console.WriteLine($"无法获取文件 {filePath} 的目录信息，无法保存笔记。");
-            return;
-        }
+        string directoryName = Path.GetDirectoryName(filePath) ?? ".";
         string notesFilePath = Path.Combine(directoryName, notesFilename);
         File.WriteAllLines(notesFilePath, notes);
         Console.WriteLine($"Notes saved as: {notesFilePath}");
     }
 
-    static int IndexOfSequence(byte[] source, byte[] sequence, int startIndex)
+    static long IndexOfSequence(MemoryMappedViewAccessor accessor, byte[] sequence, long startOffset, long maxOffset)
     {
-        for (int i = startIndex; i <= source.Length - sequence.Length; i++)
+        long maxSearchPosition = maxOffset - sequence.Length;
+        if (startOffset > maxSearchPosition)
+            return -1;
+
+        byte firstByte = sequence[0];
+        byte[] buffer = new byte[sequence.Length];
+
+        for (long i = startOffset; i <= maxSearchPosition; i++)
         {
-            bool match = true;
-            for (int j = 0; j < sequence.Length; j++)
+            byte currentByte = accessor.ReadByte(i);
+            if (currentByte == firstByte)
             {
-                if (source[i + j] != sequence[j])
+                bool match = true;
+                for (int j = 1; j < sequence.Length; j++)
                 {
-                    match = false;
-                    break;
+                    if (accessor.ReadByte(i + j) != sequence[j])
+                    {
+                        match = false;
+                        break;
+                    }
                 }
-            }
-            if (match)
-            {
-                return i;
+                if (match)
+                {
+                    return i;
+                }
             }
         }
         return -1;
@@ -308,7 +333,6 @@ class FileExtractor
                 Console.WriteLine("请输入最小重复字节数量作为结束条件: ");
                 if (int.TryParse(Console.ReadLine(), out minRepeatCount))
                 {
-
                 }
             }
         }
